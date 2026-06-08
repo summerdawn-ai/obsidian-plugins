@@ -1,4 +1,4 @@
-import { Plugin, TFolder, WorkspaceLeaf } from 'obsidian';
+import { Plugin, TAbstractFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { CustomSortSettings, DEFAULT_SETTINGS } from './types';
 import { sortItems } from './sorter';
 import { DragHandler } from './drag-handler';
@@ -43,7 +43,9 @@ export default class CustomSortPlugin extends Plugin {
 			this.app.vault.on('delete', () => this.requestSort())
 		);
 		this.registerEvent(
-			this.app.vault.on('rename', () => this.requestSort())
+			this.app.vault.on('rename', (file, oldPath) => {
+				void this.handleRename(file, oldPath);
+			})
 		);
 
 		// Re-patch if layout changes (e.g. file explorer re-opened)
@@ -162,5 +164,82 @@ export default class CustomSortPlugin extends Plugin {
 	/** Sort items using custom order — interspersed files & folders. */
 	sortExplorerItems(items: any[], folderPath: string, order: string[]): any[] {
 		return sortItems(items, folderPath, order);
+	}
+
+	/**
+	 * Keep custom order stable when Obsidian renames/moves items.
+	 *
+	 * - Rename in same parent: replace old item name with new item name at same index.
+	 * - Move to different parent: remove from old parent order and append to new parent order (if present).
+	 * - Folder rename/move: also remap order keys for the folder path and its descendants.
+	 */
+	private async handleRename(file: TAbstractFile, oldPath: string): Promise<void> {
+		const newPath = file.path;
+		const oldParent = this.getParentPath(oldPath);
+		const newParent = this.getParentPath(newPath);
+		const oldName = this.getBaseName(oldPath);
+		const newName = file.name;
+
+		let changed = false;
+
+		const oldOrder = this.settings.orders[oldParent];
+		if (oldOrder && oldOrder.length > 0) {
+			const idx = oldOrder.indexOf(oldName);
+			if (idx !== -1) {
+				if (oldParent === newParent) {
+					oldOrder[idx] = newName;
+				} else {
+					oldOrder.splice(idx, 1);
+					if (oldOrder.length === 0) {
+						delete this.settings.orders[oldParent];
+					}
+				}
+				changed = true;
+			}
+		}
+
+		if (oldParent !== newParent) {
+			const newOrder = this.settings.orders[newParent];
+			if (newOrder && !newOrder.includes(newName)) {
+				newOrder.push(newName);
+				changed = true;
+			}
+		}
+
+		if (file instanceof TFolder) {
+			const remappedOrders: Record<string, string[]> = {};
+			let remapped = false;
+
+			for (const [key, value] of Object.entries(this.settings.orders)) {
+				if (key === oldPath || key.startsWith(oldPath + '/')) {
+					const suffix = key.slice(oldPath.length);
+					remappedOrders[newPath + suffix] = value;
+					remapped = true;
+				} else {
+					remappedOrders[key] = value;
+				}
+			}
+
+			if (remapped) {
+				this.settings.orders = remappedOrders;
+				changed = true;
+			}
+		}
+
+		if (changed) {
+			await this.saveSettings();
+		} else {
+			this.requestSort();
+		}
+	}
+
+	private getParentPath(path: string): string {
+		const idx = path.lastIndexOf('/');
+		return idx === -1 ? '' : path.substring(0, idx);
+	}
+
+	private getBaseName(path: string): string {
+		const idx = path.lastIndexOf('/');
+		return idx === -1 ? path : path.substring(idx + 1);
 	}
 }

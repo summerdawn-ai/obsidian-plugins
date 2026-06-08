@@ -2,7 +2,7 @@
 
 Drag-and-drop reordering for the Obsidian file explorer. Files and folders are freely interspersed — designed for OneNote-style folder notes where a folder is just a file with children.
 
-> **Status:** Alpha (0.1.0). Core reordering works but the modifier key interaction needs refinement. See [Known Issues](#known-issues).
+> **Status:** Alpha (0.11.0). Core reordering works but the modifier key interaction needs refinement. See [Known Issues](#known-issues).
 
 ## Features
 
@@ -25,13 +25,15 @@ Drag-and-drop reordering for the Obsidian file explorer. Files and folders are f
 
 ```bash
 # Clone or copy the plugin into your vault
-cp main.js manifest.json styles.css \
+cp dist/main.js manifest.json styles.css \
    .obsidian/plugins/custom-sort/
 ```
 
 Then enable **Custom Sort** in Settings → Community plugins.
 
 **If you also use the `Folder Sort Rules` plugin, disable it first** — both plugins patch the same explorer method and will conflict.
+
+After deploying a new plugin build to your vault (`main.js`, `manifest.json`, `styles.css`), reload the plugin or restart Obsidian so the new code is actually loaded.
 
 ## Development
 
