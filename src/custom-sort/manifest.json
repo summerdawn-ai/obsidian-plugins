@@ -1,0 +1,9 @@
+{
+	"id": "custom-sort",
+	"name": "Custom Sort",
+	"version": "0.1.0-alpha",
+	"minAppVersion": "1.12.0",
+	"description": "Drag & drop to reorder files and folders interspersed in the file explorer, with automatic per-folder custom ordering.",
+	"author": "summerdawn.ai",
+	"isDesktopOnly": false
+}
