@@ -1,0 +1,7 @@
+.file-explorer-filter-hidden {
+	display: none !important;
+}
+
+.file-explorer-filter-button.is-active {
+	color: var(--interactive-accent);
+}
