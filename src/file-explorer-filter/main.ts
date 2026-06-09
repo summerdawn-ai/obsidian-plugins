@@ -1,8 +1,25 @@
-import { Menu, Notice, Plugin, setIcon, TFolder, WorkspaceLeaf } from "obsidian";
+import {
+	App,
+	Menu,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	setIcon,
+	Setting,
+	TFolder,
+	WorkspaceLeaf,
+} from "obsidian";
 
 interface FileExplorerFilterSettings {
 	scope: string | null;
-	hideDone: boolean;
+	hideMatchingNames: boolean;
+	nameFilterEnabled: boolean;
+	nameFilterText: string;
+}
+
+interface StoredFileExplorerFilterSettings
+	extends Partial<FileExplorerFilterSettings> {
+	hideDone?: boolean;
 }
 
 interface FileExplorerView {
@@ -11,7 +28,9 @@ interface FileExplorerView {
 
 const DEFAULT_SETTINGS: FileExplorerFilterSettings = {
 	scope: null,
-	hideDone: false,
+	hideMatchingNames: false,
+	nameFilterEnabled: true,
+	nameFilterText: "[DONE]",
 };
 
 const HIDDEN_CLASS = "file-explorer-filter-hidden";
@@ -25,6 +44,7 @@ export default class FileExplorerFilterPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.addSettingTab(new FileExplorerFilterSettingTab(this.app, this));
 
 		this.app.workspace.onLayoutReady(() => this.setupExplorerViewsSafely());
 
@@ -41,9 +61,15 @@ export default class FileExplorerFilterPlugin extends Plugin {
 			callback: () => this.showFilterMenu(),
 		});
 		this.addCommand({
-			id: "toggle-hide-done",
-			name: "Toggle files and folders ending in [DONE]",
-			callback: () => void this.setHideDone(!this.filterSettings.hideDone),
+			id: "toggle-name-filter",
+			name: "Toggle files and folders matching the name filter",
+			callback: () => {
+				if (this.filterSettings.nameFilterEnabled) {
+					void this.setHideMatchingNames(
+						!this.filterSettings.hideMatchingNames,
+					);
+				}
+			},
 		});
 	}
 
@@ -68,7 +94,20 @@ export default class FileExplorerFilterPlugin extends Plugin {
 	}
 
 	private async loadSettings(): Promise<void> {
-		this.filterSettings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const stored =
+			((await this.loadData()) as StoredFileExplorerFilterSettings | null) ?? {};
+		this.filterSettings = Object.assign({}, DEFAULT_SETTINGS, stored);
+
+		if (
+			typeof stored.hideMatchingNames !== "boolean" &&
+			typeof stored.hideDone === "boolean"
+		) {
+			this.filterSettings.hideMatchingNames = stored.hideDone;
+		}
+
+		const trimmedText = this.filterSettings.nameFilterText.trim();
+		this.filterSettings.nameFilterText =
+			trimmedText.length > 0 ? trimmedText : DEFAULT_SETTINGS.nameFilterText;
 	}
 
 	private async saveSettings(): Promise<void> {
@@ -170,13 +209,25 @@ export default class FileExplorerFilterPlugin extends Plugin {
 			);
 		}
 
-		menu.addSeparator();
-		menu.addItem((item) =>
-			item
-				.setTitle("Hide names ending in [DONE]")
-				.setIcon(this.filterSettings.hideDone ? "check-square" : "square")
-				.onClick(() => void this.setHideDone(!this.filterSettings.hideDone)),
-		);
+		if (this.filterSettings.nameFilterEnabled) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle(
+						`Hide names containing "${this.filterSettings.nameFilterText}"`,
+					)
+					.setIcon(
+						this.filterSettings.hideMatchingNames
+							? "check-square"
+							: "square",
+					)
+					.onClick(() =>
+						void this.setHideMatchingNames(
+							!this.filterSettings.hideMatchingNames,
+						),
+					),
+			);
+		}
 
 		if (event) {
 			menu.showAtMouseEvent(event);
@@ -195,8 +246,38 @@ export default class FileExplorerFilterPlugin extends Plugin {
 		this.refresh();
 	}
 
-	private async setHideDone(hideDone: boolean): Promise<void> {
-		this.filterSettings.hideDone = hideDone;
+	async setNameFilterEnabled(enabled: boolean): Promise<void> {
+		this.filterSettings.nameFilterEnabled = enabled;
+		if (!enabled) {
+			this.filterSettings.hideMatchingNames = false;
+		}
+		await this.saveSettings();
+		this.refresh();
+	}
+
+	async setNameFilterText(text: string): Promise<boolean> {
+		const trimmedText = text.trim();
+		if (trimmedText.length === 0) {
+			return false;
+		}
+
+		this.filterSettings.nameFilterText = trimmedText;
+		await this.saveSettings();
+		this.refresh();
+		return true;
+	}
+
+	getNameFilterText(): string {
+		return this.filterSettings.nameFilterText;
+	}
+
+	isNameFilterEnabled(): boolean {
+		return this.filterSettings.nameFilterEnabled;
+	}
+
+	private async setHideMatchingNames(hidden: boolean): Promise<void> {
+		this.filterSettings.hideMatchingNames =
+			this.filterSettings.nameFilterEnabled && hidden;
 		await this.saveSettings();
 		this.refresh();
 	}
@@ -220,11 +301,17 @@ export default class FileExplorerFilterPlugin extends Plugin {
 
 		for (const button of this.buttons.values()) {
 			const scopeLabel = this.filterSettings.scope ?? "All folders";
-			const doneLabel = this.filterSettings.hideDone ? ", [DONE] hidden" : "";
-			button.setAttribute("aria-label", `File explorer filter: ${scopeLabel}${doneLabel}`);
+			const nameFilterLabel = this.filterSettings.hideMatchingNames
+				? `, names containing "${this.filterSettings.nameFilterText}" hidden`
+				: "";
+			button.setAttribute(
+				"aria-label",
+				`File explorer filter: ${scopeLabel}${nameFilterLabel}`,
+			);
 			button.toggleClass(
 				"is-active",
-				this.filterSettings.scope !== null || this.filterSettings.hideDone,
+				this.filterSettings.scope !== null ||
+					this.filterSettings.hideMatchingNames,
 			);
 		}
 	}
@@ -242,8 +329,11 @@ export default class FileExplorerFilterPlugin extends Plugin {
 			}
 
 			const hiddenByScope = !this.isPathInScope(path);
-			const hiddenByDone = this.filterSettings.hideDone && this.pathEndsInDone(path);
-			treeItem.toggleClass(HIDDEN_CLASS, hiddenByScope || hiddenByDone);
+			const hiddenByName =
+				this.filterSettings.nameFilterEnabled &&
+				this.filterSettings.hideMatchingNames &&
+				this.nameContainsFilter(path);
+			treeItem.toggleClass(HIDDEN_CLASS, hiddenByScope || hiddenByName);
 		}
 	}
 
@@ -260,9 +350,61 @@ export default class FileExplorerFilterPlugin extends Plugin {
 		);
 	}
 
-	private pathEndsInDone(path: string): boolean {
+	private nameContainsFilter(path: string): boolean {
 		const name = path.split("/").pop() ?? path;
-		const stem = name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
-		return stem.trimEnd().toUpperCase().endsWith("[DONE]");
+		return name
+			.toLocaleLowerCase()
+			.includes(this.filterSettings.nameFilterText.toLocaleLowerCase());
+	}
+}
+
+class FileExplorerFilterSettingTab extends PluginSettingTab {
+	constructor(
+		app: App,
+		private readonly plugin: FileExplorerFilterPlugin,
+	) {
+		super(app, plugin);
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		containerEl.createEl("h2", { text: "File Explorer Filter" });
+
+		new Setting(containerEl)
+			.setName("Show name filter")
+			.setDesc(
+				"Show a menu option that hides files and folders containing configured text.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.isNameFilterEnabled())
+					.onChange(async (enabled) => {
+						await this.plugin.setNameFilterEnabled(enabled);
+						this.display();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Name contains")
+			.setDesc("Case-insensitive text to match in file and folder names.")
+			.addText((text) => {
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.nameFilterText)
+					.setValue(this.plugin.getNameFilterText())
+					.setDisabled(!this.plugin.isNameFilterEnabled());
+
+				text.inputEl.addEventListener("blur", () => {
+					void (async () => {
+						const accepted = await this.plugin.setNameFilterText(
+							text.getValue(),
+						);
+						if (!accepted) {
+							text.setValue(this.plugin.getNameFilterText());
+							new Notice("Name filter text cannot be empty or whitespace.");
+						}
+					})();
+				});
+			});
 	}
 }

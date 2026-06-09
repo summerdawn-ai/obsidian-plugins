@@ -3,7 +3,7 @@
 	"name": "File Explorer Filter",
 	"version": "0.1.0-alpha",
 	"minAppVersion": "1.4.0",
-	"description": "Switch the file explorer between top-level folder views and optionally hide files or folders ending in [DONE].",
+	"description": "Switch between top-level folder views and optionally hide names containing configurable text.",
 	"author": "summerdawn.ai",
 	"isDesktopOnly": false
 }

@@ -6,8 +6,9 @@ sorting implementation.
 ## Features
 
 - Switch between all files and any top-level vault folder.
-- Optionally hide files and folders whose names end in `[DONE]`.
-- Combine folder scope and `[DONE]` filtering.
+- Optionally hide files and folders whose names contain configurable text.
+- Enable or disable the name-filter menu option in plugin settings.
+- Combine folder scope and name filtering.
 - Remember the selected filter across Obsidian restarts.
 - Keep hidden items available through search, links, backlinks, and the quick
   switcher.
@@ -17,14 +18,22 @@ sorting implementation.
 
 1. Select the filter icon in the file explorer toolbar.
 2. Choose **All folders** or a top-level folder such as **Career**.
-3. Toggle **Hide names ending in [DONE]** independently.
+3. Toggle **Hide names containing "[DONE]"** independently.
+
+Under **Settings > File Explorer Filter**, you can:
+
+- Show or hide the name-filter menu option.
+- Replace `[DONE]` with any non-empty text.
+
+Name matching is case-insensitive and can occur anywhere in the file or folder
+name. Empty or whitespace-only settings are rejected.
 
 The active filter icon uses the vault's accent color.
 
 Two command-palette commands are also available:
 
 - **File Explorer Filter: Show file explorer filter menu**
-- **File Explorer Filter: Toggle files and folders ending in [DONE]**
+- **File Explorer Filter: Toggle files and folders matching the name filter**
 
 ## Installation
 
