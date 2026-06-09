@@ -1,18 +1,28 @@
 # Obsidian Plugins
 
-Monorepo for Obsidian extensions and related customization assets.
+Plugin projects for summerdawn.ai.
 
-## Projects
+## Plugins
 
 ### Custom Sort
 
-Drag-and-drop custom ordering for the Obsidian file explorer with interspersed files and folders.
+Adds drag-and-drop custom ordering to the Obsidian file explorer with interspersed files and folders.
 
 Project location: `src/custom-sort`
 
+### File Explorer Filter
+
+Filters the Obsidian file explorer by top-level folder and `[DONE]` status.
+
+Project location: `src/file-explorer-filter`
+
 ## Development
 
-Each plugin is developed and built in its own project folder.
+Load a plugin unpacked from its folder under `src/`:
+
+1. Open the plugin folder.
+2. Install dependencies with `npm install`.
+3. Run `npm run dev` for watch mode or `npm run build` for a production build.
 
 Example for Custom Sort:
 
