@@ -1,20 +1,23 @@
-import { TAbstractFile } from 'obsidian';
+import { TAbstractFile, TFolder } from 'obsidian';
 import type CustomSortPlugin from './main';
 
 interface DragState {
 	draggedEl: HTMLElement | null;
 	draggedFile: TAbstractFile | null;
 	placeholder: HTMLElement | null;
+	/** The folder row currently being treated as a "drop onto folder" target (empty/collapsed). */
+	folderDropTarget: { el: HTMLElement; folder: TFolder } | null;
 }
-
-/** Modifier key that enables custom reorder (vs Obsidian's native move). */
-const REORDER_MODIFIER: string = 'shift';
 
 /**
  * Handles drag-and-drop reordering in the file explorer.
  *
- * Normal drag (no modifier): Obsidian's built-in move-into-folder behavior.
- * Shift+drag: Custom reorder within the same folder (no auto-expand, no move).
+ * Custom drag/drop behavior that supports:
+ * - Reordering within a folder (before/after target rows)
+ * - Cross-level moves by dropping between rows in another folder
+ *
+ * File/folder moves are executed through Obsidian's file manager so core
+ * rename/move side effects (like link updates) are preserved.
  */
 export class DragHandler {
 	private plugin: CustomSortPlugin;
@@ -22,9 +25,10 @@ export class DragHandler {
 		draggedEl: null,
 		draggedFile: null,
 		placeholder: null,
+		folderDropTarget: null,
 	};
 	private cleanupFns: (() => void)[] = [];
-	/** Map of parentPath → set of visible child names (from DOM). */
+	/** Map of parentPath -> set of visible child names (from rendered explorer rows). */
 	private visibleByParent: Map<string, Set<string>> = new Map();
 
 	constructor(plugin: CustomSortPlugin) {
@@ -40,13 +44,13 @@ export class DragHandler {
 		const fileItems: Record<string, any> = explorerView.fileItems;
 		if (!fileItems) return;
 
-		// Build visible-items map: which items actually have DOM elements.
-		// Hidden files (e.g. .json) and CSS-hidden folders (e.g. Assets)
-		// are excluded so position calculations match what the user sees.
+		// Build visible-items map from currently rendered rows.
 		this.visibleByParent.clear();
 		for (const item of Object.values(fileItems)) {
 			if (!item || !item.file || !item.selfEl) continue;
 			if (item.file.isRoot?.()) continue;
+			const itemEl = item.selfEl as HTMLElement;
+			if (itemEl.offsetParent === null) continue;
 
 			const parentPath: string = item.file.parent?.path ?? '';
 			if (!this.visibleByParent.has(parentPath)) {
@@ -83,11 +87,8 @@ export class DragHandler {
 		el.addClass('custom-sort-draggable');
 
 		const file: TAbstractFile = item.file;
-		const parentPath: string = file.parent?.path ?? '';
 
 		const onDragStart = (e: DragEvent) => {
-			// Always capture the drag state — we decide behavior in dragover/drop
-			// based on whether Shift is *currently* held, not just at dragstart.
 			this.state.draggedEl = el;
 			this.state.draggedFile = file;
 			el.addClass('custom-sort-dragging');
@@ -100,6 +101,7 @@ export class DragHandler {
 		const onDragEnd = () => {
 			el.removeClass('custom-sort-dragging');
 			this.removePlaceholder();
+			this.clearFolderDropTarget();
 			this.state.draggedEl = null;
 			this.state.draggedFile = null;
 		};
@@ -108,20 +110,27 @@ export class DragHandler {
 			if (!this.state.draggedFile) return;
 			if (this.state.draggedFile === file) return;
 
-			// Only reorder within same parent folder
-			const draggedParent = this.state.draggedFile.parent?.path ?? '';
-			if (draggedParent !== parentPath) return;
-
-			// If Shift is NOT held, let Obsidian handle natively
-			if (!this.isReorderKey(e)) return;
-
-			// Shift IS held — kill native expand/move behavior
+			// Own drag behavior entirely to avoid native expand/move conflicts.
 			e.preventDefault();
 			e.stopPropagation();
 
 			if (e.dataTransfer) {
 				e.dataTransfer.dropEffect = 'move';
 			}
+
+			// ── Empty/collapsed folder: treat the folder row itself as a drop zone ──
+			if (file instanceof TFolder && this.isFolderEmptyOrCollapsed(file)) {
+				if (!this.canDropOnTarget(this.state.draggedFile, file)) return;
+
+				this.removePlaceholder();
+				this.setFolderDropTarget(el, file);
+				return;
+			}
+
+			// ── Normal between-row indicator ──
+			if (!this.canDropOnTarget(this.state.draggedFile, file)) return;
+
+			this.clearFolderDropTarget();
 
 			const rect = el.getBoundingClientRect();
 			const midY = rect.top + rect.height / 2;
@@ -142,44 +151,98 @@ export class DragHandler {
 			if (!this.state.draggedFile) return;
 			if (this.state.draggedFile === file) return;
 
-			const draggedParent = this.state.draggedFile.parent?.path ?? '';
-			if (draggedParent !== parentPath) return;
-
-			// If Shift is NOT held, let Obsidian handle the drop natively
-			if (!this.isReorderKey(e)) return;
-
 			e.preventDefault();
 			e.stopPropagation();
 			this.removePlaceholder();
 
-			const draggedName = this.state.draggedFile.name;
+			const draggedFile = this.state.draggedFile;
+			const draggedName = draggedFile.name;
+			const sourceParent = draggedFile.parent?.path ?? '';
 
-			// Build order from VISIBLE items only, so positions match what user sees
-			let order = this.plugin.settings.orders[parentPath];
-			if (!order || order.length === 0) {
-				order = this.buildInitialOrder(parentPath);
+			// ── Drop onto empty/collapsed folder header ──
+			if (this.state.folderDropTarget !== null) {
+				const targetFolder = this.state.folderDropTarget.folder;
+
+				if (!this.canDropOnTarget(draggedFile, file)) return;
+				if (!this.canMoveToParent(draggedFile, targetFolder.path)) return;
+
+				// Insert at position 0 in the target folder
+				if (sourceParent !== targetFolder.path) {
+					const destinationPath = targetFolder.path
+						? `${targetFolder.path}/${draggedName}`
+						: draggedName;
+
+					const oldDraggedPath = draggedFile.path;
+
+					this.plugin.beginInternalMove();
+					try {
+						await this.plugin.app.fileManager.renameFile(
+							draggedFile,
+							destinationPath
+						);
+					} catch {
+						return;
+					} finally {
+						this.plugin.endInternalMove();
+					}
+
+					if (draggedFile instanceof TFolder) {
+						this.remapFolderOrderKeys(oldDraggedPath, draggedFile.path);
+					}
+				}
+
+				this.applyReorderToEmptyFolder(sourceParent, targetFolder.path, draggedName);
+				this.clearFolderDropTarget();
+
+				await this.plugin.saveSettings();
+				this.cleanupStaleOrders();
+				return;
 			}
-			// Filter to only visible items
-			order = this.filterVisible(parentPath, order);
 
-			// Remove dragged item
-			const withoutDragged = order.filter((n) => n !== draggedName);
+			// ── Normal between-row drop ──
+			if (!this.canDropOnTarget(this.state.draggedFile, file)) return;
+
+			this.clearFolderDropTarget();
+
+			const destinationParent = file.parent?.path ?? '';
 
 			const rect = el.getBoundingClientRect();
 			const midY = rect.top + rect.height / 2;
-			const targetIdx = withoutDragged.indexOf(file.name);
+			const insertBefore = e.clientY < midY;
 
-			if (targetIdx === -1) {
-				withoutDragged.push(draggedName);
-			} else if (e.clientY < midY) {
-				withoutDragged.splice(targetIdx, 0, draggedName);
-			} else {
-				withoutDragged.splice(targetIdx + 1, 0, draggedName);
+			if (sourceParent !== destinationParent) {
+				if (!this.canMoveToParent(draggedFile, destinationParent)) return;
+				const oldDraggedPath = draggedFile.path;
+
+				const destinationPath = destinationParent
+					? `${destinationParent}/${draggedName}`
+					: draggedName;
+
+				this.plugin.beginInternalMove();
+				try {
+					await this.plugin.app.fileManager.renameFile(
+						draggedFile,
+						destinationPath
+					);
+				} catch {
+					return;
+				} finally {
+					this.plugin.endInternalMove();
+				}
+
+				if (draggedFile instanceof TFolder) {
+					this.remapFolderOrderKeys(oldDraggedPath, draggedFile.path);
+				}
 			}
 
-			// Merge back hidden items at their original positions
-			this.plugin.settings.orders[parentPath] =
-				this.mergeHiddenBack(parentPath, withoutDragged);
+			this.applyReorder(
+				sourceParent,
+				destinationParent,
+				draggedName,
+				file.name,
+				insertBefore
+			);
+
 			await this.plugin.saveSettings();
 			this.cleanupStaleOrders();
 		};
@@ -198,22 +261,149 @@ export class DragHandler {
 		});
 	}
 
-	// ── helpers ──────────────────────────────────────────────
+	private canDropOnTarget(dragged: TAbstractFile, target: TAbstractFile): boolean {
+		const destinationParent = target.parent?.path ?? '';
 
-	private isReorderKey(e: DragEvent | MouseEvent): boolean {
-		switch (REORDER_MODIFIER) {
-			case 'shift': return e.shiftKey;
-			case 'ctrl': return e.ctrlKey;
-			case 'alt': return e.altKey;
-			default: return e.shiftKey;
+		if (dragged.path === destinationParent) return false;
+		if (destinationParent.startsWith(dragged.path + '/')) return false;
+
+		return true;
+	}
+
+	// ── Empty / collapsed folder drop target ─────────────────
+
+	private isFolderEmptyOrCollapsed(folder: TFolder): boolean {
+		// Check visible children: if any visible child exists and is rendered, folder is "non-empty" for drop purposes
+		for (const child of folder.children) {
+			if (this.isVisible(folder.path, child.name)) return false;
+		}
+		return true;
+	}
+
+	private setFolderDropTarget(el: HTMLElement, folder: TFolder): void {
+		if (this.state.folderDropTarget?.el === el) return; // already active
+		this.clearFolderDropTarget();
+		el.addClass('custom-sort-drop-folder');
+		this.state.folderDropTarget = { el, folder };
+	}
+
+	private clearFolderDropTarget(): void {
+		if (this.state.folderDropTarget) {
+			this.state.folderDropTarget.el.removeClass('custom-sort-drop-folder');
+			this.state.folderDropTarget = null;
 		}
 	}
 
-	/** Build initial order from folder children, filtered to visible items only. */
-	private buildInitialOrder(parentPath: string): string[] {
+	private applyReorderToEmptyFolder(
+		sourceParent: string,
+		targetFolderPath: string,
+		draggedName: string
+	): void {
+		// Remove from source
+		if (sourceParent !== targetFolderPath) {
+			const sourceWorking = this.getWorkingOrder(sourceParent).filter(
+				(name) => name !== draggedName
+			);
+			if (sourceWorking.length > 0) {
+				this.plugin.settings.orders[sourceParent] = this.mergeHiddenBack(
+					sourceParent,
+					sourceWorking
+				);
+			} else {
+				delete this.plugin.settings.orders[sourceParent];
+			}
+		} else {
+			// Same parent — just ensure it's removed from current order
+			const working = this.getWorkingOrder(targetFolderPath).filter(
+				(name) => name !== draggedName
+			);
+			if (working.length > 0) {
+				this.plugin.settings.orders[targetFolderPath] = this.mergeHiddenBack(
+					targetFolderPath,
+					working
+				);
+			}
+		}
+
+		// Insert at position 0 in target
+		const destinationWorking = this.getWorkingOrder(targetFolderPath).filter(
+			(name) => name !== draggedName
+		);
+		destinationWorking.splice(0, 0, draggedName);
+
+		this.plugin.settings.orders[targetFolderPath] = this.mergeHiddenBack(
+			targetFolderPath,
+			destinationWorking
+		);
+	}
+
+	private canMoveToParent(dragged: TAbstractFile, destinationParent: string): boolean {
+		if (dragged.path === destinationParent) return false;
+		if (destinationParent.startsWith(dragged.path + '/')) return false;
+		return true;
+	}
+
+	private applyReorder(
+		sourceParent: string,
+		destinationParent: string,
+		draggedName: string,
+		targetName: string,
+		insertBefore: boolean
+	): void {
+		if (sourceParent !== destinationParent) {
+			const sourceWorking = this.getWorkingOrder(sourceParent).filter(
+				(name) => name !== draggedName
+			);
+			if (sourceWorking.length > 0) {
+				this.plugin.settings.orders[sourceParent] = this.mergeHiddenBack(
+					sourceParent,
+					sourceWorking
+				);
+			} else {
+				delete this.plugin.settings.orders[sourceParent];
+			}
+		}
+
+		const destinationWorking = this.getWorkingOrder(destinationParent).filter(
+			(name) => name !== draggedName
+		);
+
+		const targetIdx = destinationWorking.indexOf(targetName);
+		if (targetIdx === -1) {
+			destinationWorking.push(draggedName);
+		} else if (insertBefore) {
+			destinationWorking.splice(targetIdx, 0, draggedName);
+		} else {
+			destinationWorking.splice(targetIdx + 1, 0, draggedName);
+		}
+
+		this.plugin.settings.orders[destinationParent] = this.mergeHiddenBack(
+			destinationParent,
+			destinationWorking
+		);
+	}
+
+	private getWorkingOrder(parentPath: string): string[] {
+		const order = this.plugin.settings.orders[parentPath] ?? [];
+		const visibleChildren = this.getVisibleChildren(parentPath);
+
+		const working = order.filter(
+			(name) => this.isVisible(parentPath, name) && visibleChildren.includes(name)
+		);
+
+		for (const child of visibleChildren) {
+			if (!working.includes(child)) {
+				working.push(child);
+			}
+		}
+
+		return working;
+	}
+
+	private getVisibleChildren(parentPath: string): string[] {
 		const folder = this.plugin.app.vault.getFolderByPath(parentPath);
 		if (!folder) return [];
-		// Only include children that have DOM elements (visible)
+
 		return folder.children
 			.map((c) => c.name)
 			.filter((name) => this.isVisible(parentPath, name));
@@ -223,9 +413,17 @@ export class DragHandler {
 		return this.visibleByParent.get(parentPath)?.has(name) ?? true;
 	}
 
-	/** Keep only items that are visible. */
-	private filterVisible(parentPath: string, order: string[]): string[] {
-		return order.filter((name) => this.isVisible(parentPath, name));
+	private remapFolderOrderKeys(oldPath: string, newPath: string): void {
+		const remapped: Record<string, string[]> = {};
+		for (const [key, value] of Object.entries(this.plugin.settings.orders)) {
+			if (key === oldPath || key.startsWith(oldPath + '/')) {
+				const suffix = key.slice(oldPath.length);
+				remapped[newPath + suffix] = value;
+			} else {
+				remapped[key] = value;
+			}
+		}
+		this.plugin.settings.orders = remapped;
 	}
 
 	/**

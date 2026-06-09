@@ -26,6 +26,7 @@ export default class CustomSortPlugin extends Plugin {
 	private dragHandler: DragHandler;
 	private dragSetupTimer: number | null = null;
 	private patched = false;
+	private internalMoveDepth = 0;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -44,6 +45,10 @@ export default class CustomSortPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
+				if (this.internalMoveDepth > 0) {
+					this.requestSort();
+					return;
+				}
 				void this.handleRename(file, oldPath);
 			})
 		);
@@ -164,6 +169,16 @@ export default class CustomSortPlugin extends Plugin {
 	/** Sort items using custom order — interspersed files & folders. */
 	sortExplorerItems(items: any[], folderPath: string, order: string[]): any[] {
 		return sortItems(items, folderPath, order);
+	}
+
+	/** Mark beginning of plugin-controlled move operation. */
+	beginInternalMove(): void {
+		this.internalMoveDepth += 1;
+	}
+
+	/** Mark end of plugin-controlled move operation. */
+	endInternalMove(): void {
+		this.internalMoveDepth = Math.max(0, this.internalMoveDepth - 1);
 	}
 
 	/**
